@@ -35,15 +35,6 @@ SourceCredNews/
   docs/design-guidelines/meeko-extracted-design.md
 ```
 
-## Builder Program Score Path
-
-| Axis | Target | Evidence |
-|---|---:|---|
-| GenLayer fit | 5 | Core truth verdict depends on reading web sources and subjective AI reasoning. |
-| Contract quality | 4-5 | Multi-source review, semantic verdicts, reward guards, explicit errors, deterministic JSON views. |
-| Engineering | 4 | Separate contract, frontend, tests, deploy script, README, design documentation. |
-| Frontend / UX | 4 | Full claim creation, source submission, verification, and reward release flow. |
-
 ## Pre-Deploy Verification
 
 ```powershell
