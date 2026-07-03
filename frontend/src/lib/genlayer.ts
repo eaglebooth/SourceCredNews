@@ -31,7 +31,7 @@ const chainMap = {
 };
 
 const client = createClient({
-  chain: chainMap[network] ?? testnetAsimov,
+  chain: chainMap[network] ?? studionet,
   ...(endpoint ? { endpoint } : {}),
 });
 
@@ -135,7 +135,7 @@ export async function writeContract(
     }
 
     const writeClient = createClient({
-      chain: chainMap[network] ?? testnetAsimov,
+      chain: chainMap[network] ?? studionet,
       ...(endpoint ? { endpoint } : {}),
       provider: window.ethereum,
       account: account as `0x${string}`,
