@@ -21,7 +21,7 @@ declare global {
   }
 }
 
-const network = (process.env.NEXT_PUBLIC_NETWORK as NetworkName) || "testnetAsimov";
+const network = (process.env.NEXT_PUBLIC_NETWORK as NetworkName) || "studionet";
 const endpoint = process.env.NEXT_PUBLIC_GENLAYER_RPC;
 const chainMap = {
   localnet,
