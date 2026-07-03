@@ -308,9 +308,17 @@ export default function Home() {
 
   async function startVerification() {
     document.getElementById("case-study")?.scrollIntoView({ behavior: "smooth", block: "start" });
-    await createClaim();
-    await submitEvidence();
-    await verifyEvidence();
+    if (!contractConfigured) {
+      await createClaim();
+      await submitEvidence();
+      await verifyEvidence();
+    } else {
+      pushLog({
+        label: "Live Mode",
+        value: "Workspace active. Connect your wallet, then complete Step 1, 2, and 3 below one by one.",
+        tone: "ok",
+      });
+    }
   }
 
   return (

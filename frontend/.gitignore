@@ -2,3 +2,5 @@
 .next
 node_modules
 dev-server.log
+
+.vercel
