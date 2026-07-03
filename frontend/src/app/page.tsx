@@ -14,7 +14,7 @@ import {
   ShieldQuestion,
   Wallet,
 } from "lucide-react";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { connectWallet, readContract, writeContract } from "@/lib/genlayer";
 
 type Tone = "ok" | "warn" | "bad";
@@ -96,6 +96,47 @@ export default function Home() {
   function pushLog(entry: LogEntry) {
     setLogs((current) => [entry, ...current].slice(0, 5));
   }
+
+  async function syncState() {
+    setBusy("sync");
+    try {
+      const [claimCountRes, evidenceCountRes, rewardCountRes] = await Promise.all([
+        readContract("get_claim_count"),
+        readContract("get_evidence_count"),
+        readContract("get_reward_count"),
+      ]);
+
+      if (!claimCountRes.success || !evidenceCountRes.success || !rewardCountRes.success) {
+        const err = claimCountRes.error || evidenceCountRes.error || rewardCountRes.error || "RPC connection failed";
+        pushLog({ label: "Sync failed", value: err, tone: "warn" });
+        return;
+      }
+
+      const cCount = Number(claimCountRes.data);
+      const eCount = Number(evidenceCountRes.data);
+      const rCount = Number(rewardCountRes.data);
+
+      pushLog({
+        label: "Sync success",
+        value: `Connected to GenLayer. Found ${cCount} claims, ${eCount} evidence submissions, ${rCount} rewards.`,
+        tone: "ok",
+      });
+    } catch (error) {
+      pushLog({
+        label: "Sync error",
+        value: error instanceof Error ? error.message : "Unknown error during sync",
+        tone: "bad",
+      });
+    } finally {
+      setBusy("");
+    }
+  }
+
+  useEffect(() => {
+    if (contractConfigured) {
+      syncState();
+    }
+  }, []);
 
   async function handleWallet() {
     setBusy("wallet");
@@ -418,8 +459,18 @@ export default function Home() {
               </div>
             </div>
             <div className="soft-card rounded-[28px] bg-[var(--sky)] p-6">
-              <div className={`inline-flex rounded-full border border-[var(--line)] px-4 py-2 text-sm font-bold ${statusClass[view.status] || statusClass.DRAFT}`}>
-                {view.status}
+              <div className="flex items-center justify-between">
+                <div className={`inline-flex rounded-full border border-[var(--line)] px-4 py-2 text-sm font-bold ${statusClass[view.status] || statusClass.DRAFT}`}>
+                  {view.status}
+                </div>
+                <button
+                  onClick={syncState}
+                  disabled={Boolean(busy)}
+                  className="inline-flex h-9 items-center justify-center gap-1.5 rounded-full border border-[var(--line)] bg-white px-4 text-xs font-bold shadow-[2px_2px_0_var(--line)] transition-all hover:translate-x-[1px] hover:translate-y-[1px] hover:shadow-[1px_1px_0_var(--line)] disabled:opacity-50"
+                >
+                  <Loader2 size={12} className={busy === "sync" ? "animate-spin" : ""} />
+                  {busy === "sync" ? "Syncing..." : "Sync Contract"}
+                </button>
               </div>
               <div className="mt-6 grid gap-4 sm:grid-cols-3">
                 <Metric label="Quality" value={view.quality} large />

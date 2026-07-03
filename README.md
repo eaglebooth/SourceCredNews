@@ -53,7 +53,7 @@ After deploy, set:
 
 ```text
 NEXT_PUBLIC_CONTRACT_ADDRESS=<deployed address>
-NEXT_PUBLIC_NETWORK=testnetAsimov
+NEXT_PUBLIC_NETWORK=studionet
 NEXT_PUBLIC_GENLAYER_RPC=
 ```
 
