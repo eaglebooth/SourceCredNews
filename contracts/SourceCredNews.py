@@ -5,328 +5,379 @@ import typing
 import json
 
 
+@gl.evm.contract_interface
+class _Recipient:
+    class View:
+        pass
+
+    class Write:
+        pass
+
+
 class SourceCredNews(gl.Contract):
-    claim_creators: TreeMap[u256, str]
-    claim_titles: TreeMap[u256, str]
-    claim_texts: TreeMap[u256, str]
-    claim_contexts: TreeMap[u256, str]
-    claim_budgets: TreeMap[u256, u256]
-    claim_remaining: TreeMap[u256, u256]
-    claim_min_scores: TreeMap[u256, u256]
-    claim_statuses: TreeMap[u256, str]
-    claim_verdicts: TreeMap[u256, str]
-    claim_reasons: TreeMap[u256, str]
-    claim_confidence_scores: TreeMap[u256, u256]
     claim_count: u256
+    claim_creator: TreeMap[u256, str]
+    claim_title: TreeMap[u256, str]
+    claim_text: TreeMap[u256, str]
+    claim_context: TreeMap[u256, str]
+    claim_min_score: TreeMap[u256, u256]
+    claim_status: TreeMap[u256, str]
+    claim_escrow: TreeMap[u256, u256]
+    claim_reserved: TreeMap[u256, u256]
+    claim_paid: TreeMap[u256, u256]
+    claim_refunded: TreeMap[u256, u256]
+    claim_evidence_marker: TreeMap[u256, u256]
 
-    evidence_claim_ids: TreeMap[u256, u256]
-    evidence_submitters: TreeMap[u256, str]
-    evidence_primary_urls: TreeMap[u256, str]
-    evidence_secondary_urls: TreeMap[u256, str]
-    evidence_notes: TreeMap[u256, str]
-    evidence_statuses: TreeMap[u256, str]
-    evidence_quality_scores: TreeMap[u256, u256]
-    evidence_reward_percentages: TreeMap[u256, u256]
-    evidence_reasons: TreeMap[u256, str]
     evidence_count: u256
+    evidence_claim_id: TreeMap[u256, u256]
+    evidence_submitter: TreeMap[u256, str]
+    evidence_primary_url: TreeMap[u256, str]
+    evidence_secondary_url: TreeMap[u256, str]
+    evidence_notes: TreeMap[u256, str]
+    evidence_status: TreeMap[u256, str]
+    evidence_verdict: TreeMap[u256, str]
+    evidence_quality_score: TreeMap[u256, u256]
+    evidence_confidence_score: TreeMap[u256, u256]
+    evidence_payout: TreeMap[u256, u256]
+    evidence_reason: TreeMap[u256, str]
 
-    reward_claim_ids: DynArray[u256]
-    reward_evidence_ids: DynArray[u256]
-    reward_recipients: DynArray[str]
-    reward_amounts: DynArray[u256]
-    reward_count: u256
+    total_escrowed: u256
+    total_reserved: u256
+    total_paid: u256
+    total_refunded: u256
 
     def __init__(self):
         self.claim_count = u256(0)
         self.evidence_count = u256(0)
-        self.reward_count = u256(0)
+        self.total_escrowed = u256(0)
+        self.total_reserved = u256(0)
+        self.total_paid = u256(0)
+        self.total_refunded = u256(0)
 
-    @gl.public.write
-    def create_claim(
-        self,
-        creator: str,
-        title: str,
-        claim_text: str,
-        context: str,
-        bounty_amount: u256,
-        min_quality_score: u256,
-    ) -> typing.Any:
-        if len(creator) == 0:
-            return "EMPTY_CREATOR"
-        if len(title) == 0:
-            return "EMPTY_TITLE"
-        if len(claim_text) == 0:
-            return "EMPTY_CLAIM"
-        if bounty_amount == u256(0):
-            return "ZERO_BOUNTY"
-        if min_quality_score > u256(100):
-            return "BAD_MIN_SCORE"
+    def _valid_source_url(self, value: str) -> bool:
+        return value.startswith("https://") and len(value) <= 500
 
-        claim_id = self.claim_count
-        self.claim_creators[claim_id] = creator
-        self.claim_titles[claim_id] = title
-        self.claim_texts[claim_id] = claim_text
-        self.claim_contexts[claim_id] = context
-        self.claim_budgets[claim_id] = bounty_amount
-        self.claim_remaining[claim_id] = bounty_amount
-        self.claim_min_scores[claim_id] = min_quality_score
-        self.claim_statuses[claim_id] = "OPEN"
-        self.claim_verdicts[claim_id] = ""
-        self.claim_reasons[claim_id] = "Waiting for source evidence."
-        self.claim_confidence_scores[claim_id] = u256(0)
-        self.claim_count = claim_id + u256(1)
-        return claim_id
+    def _source_host(self, value: str) -> str:
+        parts = value.split("/")
+        if len(parts) < 3:
+            return ""
+        return parts[2].lower()
 
-    @gl.public.write
-    def submit_evidence(
-        self,
-        claim_id: u256,
-        submitter: str,
-        primary_url: str,
-        secondary_url: str,
-        notes: str,
-    ) -> typing.Any:
-        if claim_id >= self.claim_count:
-            return "CLAIM_NOT_FOUND"
-        if self.claim_statuses[claim_id] != "OPEN":
-            return "CLAIM_NOT_OPEN"
-        if len(submitter) == 0:
-            return "EMPTY_SUBMITTER"
-        if len(primary_url) == 0:
-            return "EMPTY_PRIMARY_URL"
-        if self.claim_remaining[claim_id] == u256(0):
-            return "NO_BOUNTY_REMAINING"
+    def _available(self, claim_id: u256) -> u256:
+        return (
+            self.claim_escrow[claim_id]
+            - self.claim_reserved[claim_id]
+            - self.claim_paid[claim_id]
+            - self.claim_refunded[claim_id]
+        )
 
-        evidence_id = self.evidence_count
-        self.evidence_claim_ids[evidence_id] = claim_id
-        self.evidence_submitters[evidence_id] = submitter
-        self.evidence_primary_urls[evidence_id] = primary_url
-        self.evidence_secondary_urls[evidence_id] = secondary_url
-        self.evidence_notes[evidence_id] = notes
-        self.evidence_statuses[evidence_id] = "PENDING"
-        self.evidence_quality_scores[evidence_id] = u256(0)
-        self.evidence_reward_percentages[evidence_id] = u256(0)
-        self.evidence_reasons[evidence_id] = "Evidence submitted and waiting for GenLayer review."
-        self.evidence_count = evidence_id + u256(1)
-        return evidence_id
+    def _parse_review(self, value: typing.Any) -> typing.Any:
+        if isinstance(value, str):
+            try:
+                data = json.loads(value)
+            except Exception:
+                return None
+        else:
+            data = value
+        if not isinstance(data, dict):
+            return None
 
-    @gl.public.write
-    def verify_evidence(self, evidence_id: u256) -> typing.Any:
-        if evidence_id >= self.evidence_count:
-            return "EVIDENCE_NOT_FOUND"
-        if self.evidence_statuses[evidence_id] != "PENDING":
-            return "ALREADY_VERIFIED"
+        verdict = str(data.get("verdict", "UNCLEAR")).upper()
+        payout_band = str(data.get("payout_band", "NONE")).upper()
+        if verdict not in ("SUPPORTED", "CONTRADICTED", "MISLEADING", "UNCLEAR"):
+            return None
+        if payout_band not in ("FULL", "PARTIAL", "NONE"):
+            return None
+        try:
+            quality = int(data.get("quality_score", 0))
+            confidence = int(data.get("confidence_score", 0))
+        except Exception:
+            return None
+        if quality < 0:
+            quality = 0
+        elif quality > 100:
+            quality = 100
+        if confidence < 0:
+            confidence = 0
+        elif confidence > 100:
+            confidence = 100
+        reason = str(data.get("reason", "No evidence-based reason was returned."))[:900]
+        return (verdict, payout_band, quality, confidence, reason)
 
-        claim_id = self.evidence_claim_ids[evidence_id]
-        if claim_id >= self.claim_count:
-            return "CLAIM_NOT_FOUND"
-        if self.claim_statuses[claim_id] != "OPEN":
-            return "CLAIM_NOT_OPEN"
-
-        title = self.claim_titles[claim_id]
-        claim_text = self.claim_texts[claim_id]
-        context = self.claim_contexts[claim_id]
-        min_score = self.claim_min_scores[claim_id]
-        submitter = self.evidence_submitters[evidence_id]
-        primary_url = self.evidence_primary_urls[evidence_id]
-        secondary_url = self.evidence_secondary_urls[evidence_id]
+    def _review_evidence(self, evidence_id: u256) -> typing.Any:
+        claim_id = self.evidence_claim_id[evidence_id]
+        title = self.claim_title[claim_id]
+        claim_text = self.claim_text[claim_id]
+        context = self.claim_context[claim_id]
+        minimum = self.claim_min_score[claim_id]
+        primary_url = self.evidence_primary_url[evidence_id]
+        secondary_url = self.evidence_secondary_url[evidence_id]
         notes = self.evidence_notes[evidence_id]
 
-        def run_review() -> str:
-            primary_content = ""
-            secondary_content = ""
-            if len(primary_url) > 0:
-                primary_response = gl.nondet.web.get(primary_url)
-                primary_content = primary_response.body.decode("utf-8")
-            if len(secondary_url) > 0:
-                secondary_response = gl.nondet.web.get(secondary_url)
-                secondary_content = secondary_response.body.decode("utf-8")
-            if len(primary_content) > 3300:
-                primary_content = primary_content[:3300]
-            if len(secondary_content) > 2500:
-                secondary_content = secondary_content[:2500]
+        def run_review() -> typing.Any:
+            def render_source(url: str, label: str) -> str:
+                try:
+                    content = gl.nondet.web.render(url, mode="text").strip()
+                    if len(content) < 100:
+                        return label + "_UNAVAILABLE: no substantive readable content"
+                    return content[:3500]
+                except Exception:
+                    return label + "_UNAVAILABLE: source could not be rendered"
 
-            prompt = (
-                "You are SourceCred News, a GenLayer on-chain fact-checking adjudicator. "
-                "Review whether submitted web sources support, contradict, or fail to clarify a public claim. "
-                "Score each category from 0 to 100: source_reliability, direct_relevance, corroboration, "
-                "contradiction_detection, and evidence_quality. "
-                "Final quality_score is the average of those five scores. "
-                "Claim verdict thresholds: SUPPORTED when reliable sources directly confirm the claim; "
-                "CONTRADICTED when reliable sources directly refute it; "
-                "MISLEADING when the claim is partly true but omits important context; "
-                "UNCLEAR when sources are weak, unavailable, or insufficient. "
-                "Reward percentage: 100 if quality_score >= min_quality_score and verdict is not UNCLEAR; "
-                "50 if quality_score >= 55 and evidence is useful; otherwise 0. "
-                "Check semantic truth and source quality, not just URL shape. "
-                f"Title: {title}\n"
-                f"Claim: {claim_text}\n"
-                f"Context: {context}\n"
-                f"Minimum quality score: {min_score}\n"
-                f"Submitter: {submitter}\n"
-                f"Submitter notes: {notes}\n"
-                f"Primary source content: {primary_content}\n"
-                f"Secondary source content: {secondary_content}\n"
-                "Respond with ONLY strict JSON, no markdown, no prose. "
-                "Use this schema exactly: "
-                "{{\"verdict\":\"SUPPORTED|CONTRADICTED|UNCLEAR|MISLEADING\","
-                "\"quality_score\":0,\"confidence_score\":0,\"reward_percentage\":0,"
-                "\"reason\":\"short reason\","
-                "\"source_reliability\":0,\"direct_relevance\":0,\"corroboration\":0,"
-                "\"contradiction_detection\":0,\"evidence_quality\":0}}"
-            )
-            return gl.nondet.exec_prompt(prompt)
+            primary = render_source(primary_url, "PRIMARY")
+            secondary = render_source(secondary_url, "SECONDARY")
+            prompt = f"""You are the independent GenLayer jury for a funded public-claim verification.
+Your judgment controls real escrowed GEN paid to the source contributor.
 
-        result = gl.eq_principle.strict_eq(run_review)
-        data = json.loads(result)
-        verdict = str(data["verdict"])
-        quality_score = u256(int(data["quality_score"]))
-        confidence_score = u256(int(data["confidence_score"]))
-        reward_percentage = u256(int(data["reward_percentage"]))
-        reason = str(data["reason"])
+TITLE: {title}
+PUBLIC CLAIM: {claim_text}
+CONTEXT: {context}
+MINIMUM FULL-PAYOUT QUALITY: {minimum}
+CONTRIBUTOR NOTES: {notes}
 
-        if quality_score > u256(100):
-            return "BAD_QUALITY_SCORE"
-        if confidence_score > u256(100):
-            return "BAD_CONFIDENCE_SCORE"
-        if reward_percentage > u256(100):
-            return "BAD_REWARD_PERCENTAGE"
+PRIMARY SOURCE ({primary_url}):
+{primary}
 
-        if verdict != "SUPPORTED" and verdict != "CONTRADICTED" and verdict != "UNCLEAR" and verdict != "MISLEADING":
-            return "UNKNOWN_VERDICT"
-        if reward_percentage == u256(100) and quality_score < min_score:
-            return "QUALITY_BELOW_MIN"
+SECONDARY SOURCE ({secondary_url}):
+{secondary}
 
-        if reward_percentage == u256(0):
-            self.evidence_statuses[evidence_id] = "REJECTED"
-        elif reward_percentage == u256(100):
-            self.evidence_statuses[evidence_id] = "APPROVED_FULL"
-        else:
-            self.evidence_statuses[evidence_id] = "APPROVED_PARTIAL"
+Determine whether the claim is SUPPORTED, CONTRADICTED, MISLEADING, or UNCLEAR.
+Judge source authority, direct relevance, independence, corroboration, recency, and contradiction handling.
+FULL requires two readable independent sources, quality >= {minimum}, and a decisive non-UNCLEAR verdict.
+PARTIAL requires quality >= 60, at least one strong readable source, useful corroboration, and a non-UNCLEAR verdict.
+NONE is mandatory when sources are unavailable, self-referential, irrelevant, too weak, or the verdict is UNCLEAR.
 
-        self.evidence_quality_scores[evidence_id] = quality_score
-        self.evidence_reward_percentages[evidence_id] = reward_percentage
-        self.evidence_reasons[evidence_id] = reason
-        self.claim_verdicts[claim_id] = verdict
-        self.claim_confidence_scores[claim_id] = confidence_score
-        self.claim_reasons[claim_id] = reason
-        if verdict != "UNCLEAR":
-            self.claim_statuses[claim_id] = "VERIFIED"
-        return result
+Return ONLY JSON with verdict, payout_band (FULL|PARTIAL|NONE), quality_score (0-100),
+confidence_score (0-100), and one concise evidence-based reason."""
+            return gl.nondet.exec_prompt(prompt, response_format="json")
+
+        principle = """Two SourceCred reviews are equivalent only when they agree on both the substantive claim verdict
+(SUPPORTED, CONTRADICTED, MISLEADING, or UNCLEAR) and the escrow payout band (FULL, PARTIAL, or NONE).
+FULL and PARTIAL are never equivalent because they transfer different amounts. NONE is never equivalent to a paying
+decision. Scores may differ by up to 10 points when they remain in the same payout band. Ignore JSON key order and
+harmless wording differences, but do not ignore conflicting source conclusions or payment outcomes."""
+        return self._parse_review(gl.eq_principle.prompt_comparative(run_review, principle))
+
+    @gl.public.write.payable
+    def create_claim(self, title: str, claim_text: str, context: str, min_quality_score: u256) -> typing.Any:
+        escrow = gl.message.value
+        if len(title) < 5 or len(title) > 160:
+            raise gl.vm.UserError("INVALID_TITLE")
+        if len(claim_text) < 30 or len(claim_text) > 1600:
+            raise gl.vm.UserError("INVALID_CLAIM")
+        if len(context) > 1200:
+            raise gl.vm.UserError("INVALID_CONTEXT")
+        if min_quality_score < u256(60) or min_quality_score > u256(100):
+            raise gl.vm.UserError("INVALID_MIN_SCORE")
+        if escrow == u256(0):
+            raise gl.vm.UserError("ESCROW_REQUIRED")
+
+        claim_id = self.claim_count
+        self.claim_creator[claim_id] = gl.message.sender_address.as_hex
+        self.claim_title[claim_id] = title
+        self.claim_text[claim_id] = claim_text
+        self.claim_context[claim_id] = context
+        self.claim_min_score[claim_id] = min_quality_score
+        self.claim_status[claim_id] = "OPEN"
+        self.claim_escrow[claim_id] = escrow
+        self.claim_reserved[claim_id] = u256(0)
+        self.claim_paid[claim_id] = u256(0)
+        self.claim_refunded[claim_id] = u256(0)
+        self.claim_evidence_marker[claim_id] = u256(0)
+        self.total_escrowed = self.total_escrowed + escrow
+        self.claim_count = claim_id + u256(1)
+        return str(claim_id)
 
     @gl.public.write
-    def release_reward(self, evidence_id: u256) -> typing.Any:
+    def submit_evidence(self, claim_id: u256, primary_url: str, secondary_url: str, notes: str) -> typing.Any:
+        if claim_id >= self.claim_count:
+            raise gl.vm.UserError("CLAIM_NOT_FOUND")
+        if self.claim_status[claim_id] != "OPEN":
+            raise gl.vm.UserError("CLAIM_NOT_OPEN")
+        submitter = gl.message.sender_address.as_hex
+        if submitter == self.claim_creator[claim_id]:
+            raise gl.vm.UserError("CREATOR_CANNOT_SUBMIT")
+        if self.claim_evidence_marker[claim_id] != u256(0):
+            raise gl.vm.UserError("EVIDENCE_ALREADY_SUBMITTED")
+        if not self._valid_source_url(primary_url) or not self._valid_source_url(secondary_url):
+            raise gl.vm.UserError("INVALID_SOURCE_URL")
+        if primary_url == secondary_url or self._source_host(primary_url) == self._source_host(secondary_url):
+            raise gl.vm.UserError("INDEPENDENT_SOURCES_REQUIRED")
+        if len(notes) < 20 or len(notes) > 1000:
+            raise gl.vm.UserError("INVALID_NOTES")
+        if self._available(claim_id) == u256(0):
+            raise gl.vm.UserError("NO_AVAILABLE_ESCROW")
+
+        evidence_id = self.evidence_count
+        self.evidence_claim_id[evidence_id] = claim_id
+        self.evidence_submitter[evidence_id] = submitter
+        self.evidence_primary_url[evidence_id] = primary_url
+        self.evidence_secondary_url[evidence_id] = secondary_url
+        self.evidence_notes[evidence_id] = notes
+        self.evidence_status[evidence_id] = "PENDING"
+        self.evidence_verdict[evidence_id] = "PENDING"
+        self.evidence_quality_score[evidence_id] = u256(0)
+        self.evidence_confidence_score[evidence_id] = u256(0)
+        self.evidence_payout[evidence_id] = u256(0)
+        self.evidence_reason[evidence_id] = "Awaiting GenLayer source review."
+        self.claim_evidence_marker[claim_id] = evidence_id + u256(1)
+        self.evidence_count = evidence_id + u256(1)
+        return str(evidence_id)
+
+    @gl.public.write
+    def evaluate_evidence(self, evidence_id: u256) -> typing.Any:
         if evidence_id >= self.evidence_count:
-            return "EVIDENCE_NOT_FOUND"
+            raise gl.vm.UserError("EVIDENCE_NOT_FOUND")
+        if self.evidence_status[evidence_id] != "PENDING":
+            raise gl.vm.UserError("EVIDENCE_NOT_PENDING")
+        parsed = self._review_evidence(evidence_id)
+        if parsed is None:
+            raise gl.vm.UserError("INVALID_AI_RESPONSE")
 
-        status = self.evidence_statuses[evidence_id]
-        if status != "APPROVED_FULL" and status != "APPROVED_PARTIAL":
-            return "NOT_APPROVED"
+        verdict, payout_band, quality_int, confidence_int, reason = parsed
+        claim_id = self.evidence_claim_id[evidence_id]
+        minimum = self.claim_min_score[claim_id]
+        available = self._available(claim_id)
+        payout = u256(0)
 
-        claim_id = self.evidence_claim_ids[evidence_id]
-        remaining = self.claim_remaining[claim_id]
-        if remaining == u256(0):
-            return "NO_BOUNTY_REMAINING"
+        if payout_band == "FULL" and u256(quality_int) < minimum:
+            payout_band = "PARTIAL" if quality_int >= 60 else "NONE"
+        if payout_band == "PARTIAL" and quality_int < 60:
+            payout_band = "NONE"
+        if verdict == "UNCLEAR":
+            payout_band = "NONE"
+        if payout_band == "FULL":
+            payout = available
+        elif payout_band == "PARTIAL":
+            payout = available // u256(2)
 
-        reward_percentage = self.evidence_reward_percentages[evidence_id]
-        if reward_percentage == u256(0):
-            return "ZERO_REWARD"
-        if reward_percentage > u256(100):
-            return "BAD_REWARD_PERCENTAGE"
+        self.evidence_verdict[evidence_id] = verdict
+        self.evidence_quality_score[evidence_id] = u256(quality_int)
+        self.evidence_confidence_score[evidence_id] = u256(confidence_int)
+        self.evidence_payout[evidence_id] = payout
+        self.evidence_reason[evidence_id] = reason
+        self.claim_status[claim_id] = "REVIEWED"
 
-        amount = self.claim_budgets[claim_id] * reward_percentage // u256(100)
-        if amount == u256(0):
-            return "ZERO_AMOUNT"
-        if amount > remaining:
-            return "INSUFFICIENT_BOUNTY"
+        if payout > u256(0):
+            self.claim_reserved[claim_id] = payout
+            self.total_reserved = self.total_reserved + payout
+            self.evidence_status[evidence_id] = "APPROVED"
+        elif verdict == "UNCLEAR":
+            self.evidence_status[evidence_id] = "NEEDS_EVIDENCE"
+        else:
+            self.evidence_status[evidence_id] = "REJECTED"
+        return self.get_evidence(evidence_id)
 
-        new_remaining = remaining - amount
-        self.claim_remaining[claim_id] = new_remaining
-        self.evidence_statuses[evidence_id] = "PAID"
+    @gl.public.write
+    def settle_reward(self, evidence_id: u256) -> str:
+        if evidence_id >= self.evidence_count:
+            raise gl.vm.UserError("EVIDENCE_NOT_FOUND")
+        if self.evidence_status[evidence_id] != "APPROVED":
+            raise gl.vm.UserError("NOT_APPROVED")
+        claim_id = self.evidence_claim_id[evidence_id]
+        payout = self.evidence_payout[evidence_id]
+        if payout == u256(0):
+            raise gl.vm.UserError("ZERO_PAYOUT")
+        if payout > self.claim_reserved[claim_id] or payout > self.total_reserved:
+            raise gl.vm.UserError("RESERVE_MISMATCH")
+        if payout > self.balance:
+            raise gl.vm.UserError("CONTRACT_BALANCE_MISMATCH")
 
-        self.reward_claim_ids.append(claim_id)
-        self.reward_evidence_ids.append(evidence_id)
-        self.reward_recipients.append(self.evidence_submitters[evidence_id])
-        self.reward_amounts.append(amount)
-        self.reward_count = self.reward_count + u256(1)
+        self.claim_reserved[claim_id] = self.claim_reserved[claim_id] - payout
+        self.claim_paid[claim_id] = self.claim_paid[claim_id] + payout
+        self.total_reserved = self.total_reserved - payout
+        self.total_paid = self.total_paid + payout
+        self.claim_status[claim_id] = "SETTLED"
+        self.evidence_status[evidence_id] = "PAID"
+        _Recipient(Address(self.evidence_submitter[evidence_id])).emit_transfer(value=payout)
         return "PAID"
 
     @gl.public.write
-    def close_claim(self, claim_id: u256) -> typing.Any:
+    def close_and_refund(self, claim_id: u256) -> str:
         if claim_id >= self.claim_count:
-            return "CLAIM_NOT_FOUND"
-        if self.claim_statuses[claim_id] == "CLOSED":
-            return "ALREADY_CLOSED"
-        self.claim_statuses[claim_id] = "CLOSED"
-        return "CLOSED"
+            raise gl.vm.UserError("CLAIM_NOT_FOUND")
+        if self.claim_creator[claim_id] != gl.message.sender_address.as_hex:
+            raise gl.vm.UserError("NOT_CLAIM_CREATOR")
+        status = self.claim_status[claim_id]
+        if status != "OPEN" and status != "REVIEWED":
+            raise gl.vm.UserError("CLAIM_NOT_REFUNDABLE")
+        marker = self.claim_evidence_marker[claim_id]
+        if marker != u256(0):
+            evidence_id = marker - u256(1)
+            evidence_status = self.evidence_status[evidence_id]
+            if evidence_status == "PENDING":
+                raise gl.vm.UserError("EVIDENCE_REVIEW_PENDING")
+            if evidence_status == "APPROVED":
+                raise gl.vm.UserError("APPROVED_PAYOUT_PENDING")
+        refund = self._available(claim_id)
+        self.claim_status[claim_id] = "CLOSED"
+        if refund == u256(0):
+            return "CLOSED"
+        self.claim_refunded[claim_id] = self.claim_refunded[claim_id] + refund
+        self.total_refunded = self.total_refunded + refund
+        _Recipient(Address(self.claim_creator[claim_id])).emit_transfer(value=refund)
+        return "REFUNDED"
 
     @gl.public.view
-    def get_claim(self, claim_id: u256) -> typing.Any:
-        if claim_id >= self.claim_count:
-            return "CLAIM_NOT_FOUND"
+    def get_platform_state(self) -> str:
         return json.dumps(
             {
+                "claim_count": int(self.claim_count),
+                "contract_balance": str(self.balance),
+                "evidence_count": int(self.evidence_count),
+                "total_escrowed": str(self.total_escrowed),
+                "total_paid": str(self.total_paid),
+                "total_refunded": str(self.total_refunded),
+                "total_reserved": str(self.total_reserved),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    @gl.public.view
+    def get_claim(self, claim_id: u256) -> str:
+        if claim_id >= self.claim_count:
+            return json.dumps({"error": "CLAIM_NOT_FOUND"}, sort_keys=True, separators=(",", ":"))
+        marker = self.claim_evidence_marker[claim_id]
+        evidence_id = int(marker - u256(1)) if marker > u256(0) else -1
+        return json.dumps(
+            {
+                "available": str(self._available(claim_id)),
                 "claim_id": int(claim_id),
-                "creator": self.claim_creators[claim_id],
-                "title": self.claim_titles[claim_id],
-                "claim_text": self.claim_texts[claim_id],
-                "context": self.claim_contexts[claim_id],
-                "budget": int(self.claim_budgets[claim_id]),
-                "remaining": int(self.claim_remaining[claim_id]),
-                "min_quality_score": int(self.claim_min_scores[claim_id]),
-                "status": self.claim_statuses[claim_id],
-                "verdict": self.claim_verdicts[claim_id],
-                "confidence_score": int(self.claim_confidence_scores[claim_id]),
-                "reason": self.claim_reasons[claim_id],
+                "claim_text": self.claim_text[claim_id],
+                "context": self.claim_context[claim_id],
+                "creator": self.claim_creator[claim_id],
+                "escrow": str(self.claim_escrow[claim_id]),
+                "evidence_id": evidence_id,
+                "min_quality_score": int(self.claim_min_score[claim_id]),
+                "paid": str(self.claim_paid[claim_id]),
+                "refunded": str(self.claim_refunded[claim_id]),
+                "reserved": str(self.claim_reserved[claim_id]),
+                "status": self.claim_status[claim_id],
+                "title": self.claim_title[claim_id],
             },
             sort_keys=True,
             separators=(",", ":"),
         )
 
     @gl.public.view
-    def get_evidence(self, evidence_id: u256) -> typing.Any:
+    def get_evidence(self, evidence_id: u256) -> str:
         if evidence_id >= self.evidence_count:
-            return "EVIDENCE_NOT_FOUND"
+            return json.dumps({"error": "EVIDENCE_NOT_FOUND"}, sort_keys=True, separators=(",", ":"))
         return json.dumps(
             {
+                "claim_id": int(self.evidence_claim_id[evidence_id]),
+                "confidence_score": int(self.evidence_confidence_score[evidence_id]),
                 "evidence_id": int(evidence_id),
-                "claim_id": int(self.evidence_claim_ids[evidence_id]),
-                "submitter": self.evidence_submitters[evidence_id],
-                "primary_url": self.evidence_primary_urls[evidence_id],
-                "secondary_url": self.evidence_secondary_urls[evidence_id],
                 "notes": self.evidence_notes[evidence_id],
-                "status": self.evidence_statuses[evidence_id],
-                "quality_score": int(self.evidence_quality_scores[evidence_id]),
-                "reward_percentage": int(self.evidence_reward_percentages[evidence_id]),
-                "reason": self.evidence_reasons[evidence_id],
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-
-    @gl.public.view
-    def get_claim_count(self) -> u256:
-        return self.claim_count
-
-    @gl.public.view
-    def get_evidence_count(self) -> u256:
-        return self.evidence_count
-
-    @gl.public.view
-    def get_reward_count(self) -> u256:
-        return self.reward_count
-
-    @gl.public.view
-    def get_reward(self, reward_id: u256) -> typing.Any:
-        if reward_id >= self.reward_count:
-            return "REWARD_NOT_FOUND"
-        return json.dumps(
-            {
-                "reward_id": int(reward_id),
-                "claim_id": int(self.reward_claim_ids[reward_id]),
-                "evidence_id": int(self.reward_evidence_ids[reward_id]),
-                "recipient": self.reward_recipients[reward_id],
-                "amount": int(self.reward_amounts[reward_id]),
+                "payout": str(self.evidence_payout[evidence_id]),
+                "primary_url": self.evidence_primary_url[evidence_id],
+                "quality_score": int(self.evidence_quality_score[evidence_id]),
+                "reason": self.evidence_reason[evidence_id],
+                "secondary_url": self.evidence_secondary_url[evidence_id],
+                "status": self.evidence_status[evidence_id],
+                "submitter": self.evidence_submitter[evidence_id],
+                "verdict": self.evidence_verdict[evidence_id],
             },
             sort_keys=True,
             separators=(",", ":"),

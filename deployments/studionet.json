@@ -1,0 +1,36 @@
+{
+  "contract": "SourceCredNews",
+  "network": "studionet",
+  "address": "0xfcfE88c93d284A00F19C7B1f7168c4A286325131",
+  "verifiedMethods": [
+    "get_platform_state",
+    "create_claim",
+    "submit_evidence",
+    "evaluate_evidence",
+    "settle_reward",
+    "close_and_refund"
+  ],
+  "liveVerification": {
+    "verifiedAt": "2026-07-19",
+    "claimId": 0,
+    "evidenceId": 0,
+    "creator": "0xeb57bc7125fa60d7482CE12058397369AB3581f8",
+    "contributor": "0xC29C0386D1839Cfa99c0009AB0Cf4524081e516e",
+    "escrowWei": "10",
+    "payoutWei": "10",
+    "verdict": "SUPPORTED",
+    "quality": 91,
+    "confidence": 95,
+    "claimStatus": "SETTLED",
+    "evidenceStatus": "PAID",
+    "finalContractBalanceWei": "0",
+    "contributorBalanceIncreaseWei": "10",
+    "transactions": {
+      "createClaim": "0x5cb7a9f7bc370b072c481e5652252b8a8337c031b6154201e6ea2c3716e5cb98",
+      "submitEvidence": "0x06e26e6a65bf2c3e7acc64cb82c6c9a94452db484737a5bcf38d8b0ba0677882",
+      "evaluateEvidence": "0x062f7f30f3d7fc5bc8c2f4d7e376c9249ef02ad3913fe48824653c4092825a2a",
+      "settleReward": "0x88e5bacd58b45a887912e388d2d49dfe71f0752dd52ae62008ca6a7109385e05",
+      "triggeredTransfer": "0xd7ca1884e231288afc2e328b83107edef359372ba38f57ddd5ea0d9efaeccd83"
+    }
+  }
+}

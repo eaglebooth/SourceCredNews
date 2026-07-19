@@ -2,628 +2,476 @@
 
 import { motion } from "framer-motion";
 import {
+  ArrowLeft,
   ArrowRight,
   BadgeCheck,
   BookOpenCheck,
+  CircleDollarSign,
+  ExternalLink,
   FileSearch,
-  HandCoins,
   Loader2,
   Newspaper,
-  PenLine,
-  SearchCheck,
-  ShieldQuestion,
+  RefreshCw,
+  RotateCcw,
+  Scale,
+  ShieldCheck,
   Wallet,
 } from "lucide-react";
-import { useState, useEffect } from "react";
-import { connectWallet, readContract, writeContract } from "@/lib/genlayer";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  configuredNetwork,
+  connectWallet,
+  defaultContractAddress,
+  readContract,
+  writeContract,
+} from "@/lib/genlayer";
 
-type Tone = "ok" | "warn" | "bad";
-
-type LogEntry = {
-  label: string;
-  value: string;
-  tone: Tone;
+type Platform = {
+  claim_count: number;
+  evidence_count: number;
+  contract_balance: string;
+  total_escrowed: string;
+  total_reserved: string;
+  total_paid: string;
+  total_refunded: string;
 };
 
-type VerificationView = {
-  claimId: string;
-  evidenceId: string;
+type Claim = {
+  available: string;
+  claim_id: number;
+  claim_text: string;
+  context: string;
+  creator: string;
+  escrow: string;
+  evidence_id: number;
+  min_quality_score: number;
+  paid: string;
+  refunded: string;
+  reserved: string;
   status: string;
-  verdict: string;
-  quality: string;
-  confidence: string;
-  reward: string;
-  reason: string;
+  title: string;
 };
 
-const statusClass: Record<string, string> = {
-  DRAFT: "bg-white",
-  OPEN: "bg-[var(--sky)]",
-  PENDING: "bg-[var(--butter)]",
-  APPROVED_FULL: "bg-[var(--mint)]",
-  APPROVED_PARTIAL: "bg-[var(--butter)]",
-  REJECTED: "bg-[var(--blush)]",
-  PAID: "bg-[var(--ink)] text-white",
-  VERIFIED: "bg-[var(--mint)]",
+type Evidence = {
+  claim_id: number;
+  confidence_score: number;
+  evidence_id: number;
+  notes: string;
+  payout: string;
+  primary_url: string;
+  quality_score: number;
+  reason: string;
+  secondary_url: string;
+  status: string;
+  submitter: string;
+  verdict: string;
 };
+
+type Notice = { tone: "info" | "success" | "error"; text: string; hash?: string };
+type Mode = "directory" | "create" | "claim" | "contract";
+
+const emptyPlatform: Platform = {
+  claim_count: 0,
+  evidence_count: 0,
+  contract_balance: "0",
+  total_escrowed: "0",
+  total_reserved: "0",
+  total_paid: "0",
+  total_refunded: "0",
+};
+
+const addressPattern = /^0x[a-fA-F0-9]{40}$/;
+const addressKey = "sourcecred.contractAddress";
+
+function initialAddress() {
+  const fallback = defaultContractAddress();
+  if (typeof window === "undefined") return fallback;
+  const saved = window.localStorage.getItem(addressKey);
+  return saved && addressPattern.test(saved) ? saved : fallback;
+}
+
+function parseRecord<T>(value: unknown): T {
+  if (typeof value === "string") return JSON.parse(value) as T;
+  return value as T;
+}
+
+function short(value: string) {
+  return value ? `${value.slice(0, 6)}...${value.slice(-4)}` : "Not connected";
+}
+
+function toWei(value: string) {
+  if (!/^\d+(\.\d{0,18})?$/.test(value.trim())) throw new Error("Enter a valid GEN amount.");
+  const [whole = "0", fraction = ""] = value.trim().split(".");
+  return BigInt(`${whole}${fraction.padEnd(18, "0")}`.replace(/^0+(?=\d)/, "") || "0");
+}
+
+function fromWei(value: string | number | bigint) {
+  const raw = BigInt(value || 0).toString().padStart(19, "0");
+  const whole = raw.slice(0, -18);
+  const fraction = raw.slice(-18).slice(0, 4).replace(/0+$/, "");
+  return `${whole}${fraction ? `.${fraction}` : ""} GEN`;
+}
+
+async function waitFor(read: () => Promise<boolean>, attempts = 60) {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    if (await read()) return true;
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+  }
+  return false;
+}
 
 export default function Home() {
-  const contractAddress = process.env.NEXT_PUBLIC_CONTRACT_ADDRESS || "";
-  const networkName = process.env.NEXT_PUBLIC_NETWORK || "testnetAsimov";
-  const contractConfigured = Boolean(contractAddress);
+  const fallbackAddress = defaultContractAddress();
+  const [address, setAddress] = useState(initialAddress);
+  const [addressDraft, setAddressDraft] = useState(initialAddress);
   const [wallet, setWallet] = useState("");
+  const [mode, setMode] = useState<Mode>("directory");
+  const [platform, setPlatform] = useState<Platform>(emptyPlatform);
+  const [claims, setClaims] = useState<Claim[]>([]);
+  const [evidence, setEvidence] = useState<Evidence[]>([]);
+  const [selectedClaimId, setSelectedClaimId] = useState<number | null>(null);
   const [busy, setBusy] = useState("");
-  const [logs, setLogs] = useState<LogEntry[]>([
-    {
-      label: "Ready",
-      value: contractConfigured
-        ? `Contract ${contractAddress.slice(0, 6)}...${contractAddress.slice(-4)} on ${networkName}.`
-        : "Demo mode active. Add NEXT_PUBLIC_CONTRACT_ADDRESS after Studio deploy.",
-      tone: contractConfigured ? "ok" : "warn",
-    },
-  ]);
-
-  const [view, setView] = useState<VerificationView>({
-    claimId: "-",
-    evidenceId: "-",
-    status: "DRAFT",
-    verdict: "-",
-    quality: "0",
-    confidence: "0",
-    reward: "0",
-    reason: "Frame a public claim, submit source URLs, then let GenLayer verify the evidence.",
-  });
-
+  const [notice, setNotice] = useState<Notice | null>(null);
   const [claimForm, setClaimForm] = useState({
-    creator: "Civic Desk DAO",
-    title: "Battery plant funding announcement",
-    claimText:
-      "The city council approved a new public grant for the North River battery plant this week.",
-    context:
-      "Verify whether the announcement is supported by official council records or reliable local reporting.",
-    bounty: "900",
-    minScore: "78",
+    title: "",
+    claimText: "",
+    context: "",
+    escrow: "1",
+    minScore: "75",
   });
+  const [evidenceForm, setEvidenceForm] = useState({ primaryUrl: "", secondaryUrl: "", notes: "" });
 
-  const [evidenceForm, setEvidenceForm] = useState({
-    submitter: "source-maya",
-    primaryUrl: "https://example.com/city-council-battery-plant-grant",
-    secondaryUrl: "https://example.com/local-news-north-river-plant",
-    notes:
-      "Primary source is a council agenda summary; secondary source is local coverage with quotes and dates.",
-  });
+  const selectedClaim = useMemo(
+    () => claims.find((item) => item.claim_id === selectedClaimId) || null,
+    [claims, selectedClaimId],
+  );
+  const selectedEvidence = useMemo(
+    () => evidence.find((item) => item.claim_id === selectedClaimId) || null,
+    [evidence, selectedClaimId],
+  );
 
-  function pushLog(entry: LogEntry) {
-    setLogs((current) => [entry, ...current].slice(0, 5));
-  }
+  const readPlatform = useCallback(async () => {
+    const result = await readContract(address, "get_platform_state");
+    return result.success ? parseRecord<Platform>(result.data) : null;
+  }, [address]);
 
-  async function syncState() {
-    setBusy("sync");
-    try {
-      const [claimCountRes, evidenceCountRes, rewardCountRes] = await Promise.all([
-        readContract("get_claim_count"),
-        readContract("get_evidence_count"),
-        readContract("get_reward_count"),
-      ]);
+  const readClaim = useCallback(async (id: number) => {
+    const result = await readContract(address, "get_claim", [id]);
+    if (!result.success) return null;
+    const parsed = parseRecord<Claim & { error?: string }>(result.data);
+    return parsed.error ? null : parsed;
+  }, [address]);
 
-      if (!claimCountRes.success || !evidenceCountRes.success || !rewardCountRes.success) {
-        const err = claimCountRes.error || evidenceCountRes.error || rewardCountRes.error || "RPC connection failed";
-        pushLog({ label: "Sync failed", value: err, tone: "warn" });
-        return;
-      }
+  const readEvidence = useCallback(async (id: number) => {
+    const result = await readContract(address, "get_evidence", [id]);
+    if (!result.success) return null;
+    const parsed = parseRecord<Evidence & { error?: string }>(result.data);
+    return parsed.error ? null : parsed;
+  }, [address]);
 
-      const cCount = Number(claimCountRes.data);
-      const eCount = Number(evidenceCountRes.data);
-      const rCount = Number(rewardCountRes.data);
-
-      pushLog({
-        label: "Sync success",
-        value: `Connected to GenLayer. Found ${cCount} claims, ${eCount} evidence submissions, ${rCount} rewards.`,
-        tone: "ok",
-      });
-    } catch (error) {
-      pushLog({
-        label: "Sync error",
-        value: error instanceof Error ? error.message : "Unknown error during sync",
-        tone: "bad",
-      });
-    } finally {
-      setBusy("");
+  const sync = useCallback(async (silent = false) => {
+    if (!addressPattern.test(address)) {
+      if (!silent) setNotice({ tone: "error", text: "Configure the deployed SourceCred V2 contract first." });
+      return;
     }
-  }
+    if (!silent) setBusy("sync");
+    const nextPlatform = await readPlatform();
+    if (!nextPlatform) {
+      setNotice({ tone: "error", text: "Contract sync failed. Confirm the address belongs to this Studionet deployment." });
+      setBusy("");
+      return;
+    }
+    const nextClaims: Claim[] = [];
+    const nextEvidence: Evidence[] = [];
+    for (let id = nextPlatform.claim_count - 1; id >= Math.max(0, nextPlatform.claim_count - 30); id -= 1) {
+      const item = await readClaim(id);
+      if (item) nextClaims.push(item);
+    }
+    for (let id = nextPlatform.evidence_count - 1; id >= Math.max(0, nextPlatform.evidence_count - 30); id -= 1) {
+      const item = await readEvidence(id);
+      if (item) nextEvidence.push(item);
+    }
+    setPlatform(nextPlatform);
+    setClaims(nextClaims);
+    setEvidence(nextEvidence);
+    if (!silent) setNotice({ tone: "success", text: `Live state loaded from ${configuredNetwork}.` });
+    setBusy("");
+  }, [address, readClaim, readEvidence, readPlatform]);
 
   useEffect(() => {
-    if (contractConfigured) {
-      syncState();
-    }
-  }, []);
+    if (!addressPattern.test(address)) return;
+    const timer = window.setTimeout(() => void sync(true), 0);
+    return () => window.clearTimeout(timer);
+  }, [address, sync]);
 
-  async function handleWallet() {
+  async function connect() {
     setBusy("wallet");
     const result = await connectWallet();
     if (result.success && typeof result.data === "string") {
       setWallet(result.data);
-      pushLog({ label: "Wallet", value: result.data, tone: "ok" });
-    } else {
-      pushLog({ label: "Wallet", value: result.error || "No wallet provider found", tone: "warn" });
+      setNotice({ tone: "success", text: `Wallet ${short(result.data)} connected.` });
+      setBusy("");
+      return true;
     }
+    setNotice({ tone: "error", text: result.error || "Wallet connection failed." });
     setBusy("");
+    return false;
+  }
+
+  async function runWrite(
+    key: string,
+    functionName: string,
+    args: unknown[],
+    value: bigint,
+    verify: () => Promise<boolean>,
+    successText: string,
+  ) {
+    if (!wallet) {
+      const connected = await connect();
+      if (connected) setNotice({ tone: "info", text: "Wallet connected. Review the action, then submit it again." });
+      return false;
+    }
+    setBusy(key);
+    setNotice({ tone: "info", text: "Confirm the transaction in your wallet. Do not submit it twice." });
+    const result = await writeContract(address, functionName, args, value);
+    if (!result.success) {
+      setNotice({ tone: result.pending ? "info" : "error", text: result.error || "Transaction failed.", hash: result.hash });
+      setBusy("");
+      return false;
+    }
+    setNotice({ tone: "info", text: "Transaction accepted. Waiting for indexed contract state; do not resubmit.", hash: result.hash });
+    const verified = await waitFor(verify);
+    if (!verified) {
+      setNotice({ tone: "info", text: "Studionet is still indexing this accepted transaction. Use Sync instead of resubmitting.", hash: result.hash });
+      setBusy("");
+      return false;
+    }
+    await sync(true);
+    setNotice({ tone: "success", text: successText, hash: result.hash });
+    setBusy("");
+    return true;
   }
 
   async function createClaim() {
-    setBusy("claim");
-    if (!contractConfigured) {
-      setView((current) => ({
-        ...current,
-        claimId: "0",
-        status: "OPEN",
-        reason: "Demo claim bounty opened with 900 tokens reserved for high-quality source evidence.",
-      }));
-      pushLog({ label: "Claim", value: "Created demo verification claim #0.", tone: "ok" });
-      setBusy("");
+    const before = platform.claim_count;
+    if (claimForm.title.trim().length < 5 || claimForm.claimText.trim().length < 30) {
+      setNotice({ tone: "error", text: "Add a specific title and a public claim of at least 30 characters." });
       return;
     }
-
-    const result = await writeContract("create_claim", [
-      claimForm.creator,
-      claimForm.title,
-      claimForm.claimText,
-      claimForm.context,
-      Number(claimForm.bounty || "0"),
-      Number(claimForm.minScore || "0"),
-    ]);
-    pushLog({
-      label: "create_claim",
-      value: result.success ? `Finalized ${String(result.data ?? result.hash)}` : result.error || "Failed",
-      tone: result.success ? "ok" : "bad",
-    });
-    if (result.success) {
-      const claimId = typeof result.data === "number" || typeof result.data === "string" ? String(result.data) : "0";
-      setView((current) => ({
-        ...current,
-        claimId,
-        status: "OPEN",
-        reason: `Claim #${claimId} was created on GenLayer. Submit source evidence next.`,
-      }));
+    let escrow: bigint;
+    try {
+      escrow = toWei(claimForm.escrow);
+    } catch (error) {
+      setNotice({ tone: "error", text: error instanceof Error ? error.message : "Invalid GEN amount." });
+      return;
     }
-    setBusy("");
+    const ok = await runWrite(
+      "create",
+      "create_claim",
+      [claimForm.title.trim(), claimForm.claimText.trim(), claimForm.context.trim(), Number(claimForm.minScore)],
+      escrow,
+      async () => (await readPlatform())?.claim_count === before + 1,
+      "Funded verification claim created on-chain.",
+    );
+    if (ok) {
+      setSelectedClaimId(before);
+      setMode("claim");
+    }
   }
 
   async function submitEvidence() {
-    setBusy("evidence");
-    if (!contractConfigured) {
-      setView({
-        claimId: "0",
-        evidenceId: "0",
-        status: "PENDING",
-        verdict: "-",
-        quality: "0",
-        confidence: "0",
-        reward: "0",
-        reason: "Two source URLs submitted. SourceCred News is ready to verify semantic support.",
-      });
-      pushLog({ label: "Evidence", value: "Submitted demo source packet #0.", tone: "ok" });
-      setBusy("");
+    if (!selectedClaim) return;
+    const before = platform.evidence_count;
+    if (!evidenceForm.primaryUrl.startsWith("https://") || !evidenceForm.secondaryUrl.startsWith("https://")) {
+      setNotice({ tone: "error", text: "Provide two HTTPS source URLs from independent publishers." });
       return;
     }
-
-    const result = await writeContract("submit_evidence", [
-      Number(view.claimId === "-" ? "0" : view.claimId),
-      evidenceForm.submitter,
-      evidenceForm.primaryUrl,
-      evidenceForm.secondaryUrl,
-      evidenceForm.notes,
-    ]);
-    pushLog({
-      label: "submit_evidence",
-      value: result.success ? `Finalized ${String(result.data ?? result.hash)}` : result.error || "Failed",
-      tone: result.success ? "ok" : "bad",
-    });
-    if (result.success) {
-      const evidenceId =
-        typeof result.data === "number" || typeof result.data === "string" ? String(result.data) : "0";
-      setView((current) => ({
-        ...current,
-        evidenceId,
-        status: "PENDING",
-        reason: `Evidence #${evidenceId} was submitted to the configured GenLayer contract.`,
-      }));
-    }
-    setBusy("");
+    const ok = await runWrite(
+      "submit",
+      "submit_evidence",
+      [selectedClaim.claim_id, evidenceForm.primaryUrl.trim(), evidenceForm.secondaryUrl.trim(), evidenceForm.notes.trim()],
+      BigInt(0),
+      async () => (await readPlatform())?.evidence_count === before + 1,
+      "Independent source packet recorded on-chain.",
+    );
+    if (ok) await sync(true);
   }
 
-  async function verifyEvidence() {
-    setBusy("verify");
-    if (!contractConfigured) {
-      await new Promise((resolve) => setTimeout(resolve, 650));
-      setView({
-        claimId: "0",
-        evidenceId: "0",
-        status: "APPROVED_FULL",
-        verdict: "SUPPORTED",
-        quality: "88",
-        confidence: "84",
-        reward: "100",
-        reason:
-          "The sources directly support the claim with dated council records and corroborating local reporting.",
-      });
-      pushLog({ label: "AI verdict", value: "SUPPORTED. Quality 88, reward 100%.", tone: "ok" });
-      setBusy("");
+  async function evaluateEvidence() {
+    if (!selectedEvidence) return;
+    const id = selectedEvidence.evidence_id;
+    await runWrite(
+      "evaluate",
+      "evaluate_evidence",
+      [id],
+      BigInt(0),
+      async () => (await readEvidence(id))?.status !== "PENDING",
+      "GenLayer verdict and payout band verified on-chain.",
+    );
+  }
+
+  async function settleReward() {
+    if (!selectedEvidence) return;
+    const id = selectedEvidence.evidence_id;
+    await runWrite(
+      "settle",
+      "settle_reward",
+      [id],
+      BigInt(0),
+      async () => (await readEvidence(id))?.status === "PAID",
+      "Escrow transferred to the authenticated source contributor.",
+    );
+  }
+
+  async function closeClaim() {
+    if (!selectedClaim) return;
+    const id = selectedClaim.claim_id;
+    await runWrite(
+      "refund",
+      "close_and_refund",
+      [id],
+      BigInt(0),
+      async () => (await readClaim(id))?.status === "CLOSED",
+      "Unreserved escrow returned to the authenticated claim creator.",
+    );
+  }
+
+  function useAddress() {
+    if (!addressPattern.test(addressDraft)) {
+      setNotice({ tone: "error", text: "Contract address must be a 40-byte 0x address." });
       return;
     }
-
-    const evidenceId = Number(view.evidenceId === "-" ? "0" : view.evidenceId);
-    const result = await writeContract("verify_evidence", [evidenceId]);
-    pushLog({
-      label: "verify_evidence",
-      value: result.success ? `AI verdict ${String(result.data ?? result.hash)}` : result.error || "Failed",
-      tone: result.success ? "ok" : "bad",
-    });
-    if (result.success) {
-      const evidenceRead = await readContract("get_evidence", [evidenceId]);
-      const claimRead = await readContract("get_claim", [Number(view.claimId === "-" ? "0" : view.claimId)]);
-      if (evidenceRead.success && claimRead.success && typeof evidenceRead.data === "string" && typeof claimRead.data === "string") {
-        const evidence = JSON.parse(evidenceRead.data);
-        const claim = JSON.parse(claimRead.data);
-        setView({
-          claimId: String(evidence.claim_id || "0"),
-          evidenceId: String(evidence.evidence_id || "0"),
-          status: String(evidence.status || "PENDING"),
-          verdict: String(claim.verdict || "-"),
-          quality: String(evidence.quality_score || "0"),
-          confidence: String(claim.confidence_score || "0"),
-          reward: String(evidence.reward_percentage || "0"),
-          reason: String(evidence.reason || claim.reason || ""),
-        });
-      }
-    }
-    setBusy("");
+    window.localStorage.setItem(addressKey, addressDraft);
+    setAddress(addressDraft);
+    setNotice({ tone: "info", text: "Contract override selected. Verifying live state..." });
   }
 
-  async function releaseReward() {
-    setBusy("reward");
-    if (!contractConfigured) {
-      const canPay = view.status === "APPROVED_FULL" || view.status === "APPROVED_PARTIAL";
-      setView((current) => ({
-        ...current,
-        status: canPay ? "PAID" : current.status,
-        reason: canPay ? "Demo reward ledger paid 900 tokens to source-maya." : "Evidence must be approved before reward release.",
-      }));
-      pushLog({ label: "Reward", value: canPay ? "Released demo reward." : "Blocked until approved.", tone: canPay ? "ok" : "warn" });
-      setBusy("");
-      return;
-    }
-
-    const result = await writeContract("release_reward", [Number(view.evidenceId === "-" ? "0" : view.evidenceId)]);
-    pushLog({
-      label: "release_reward",
-      value: result.success ? `Finalized ${String(result.data ?? result.hash)}` : result.error || "Failed",
-      tone: result.success ? "ok" : "bad",
-    });
-    if (result.success) {
-      setView((current) => ({ ...current, status: "PAID", reason: "Source reward was finalized on GenLayer." }));
-    }
-    setBusy("");
+  function restoreAddress() {
+    window.localStorage.removeItem(addressKey);
+    setAddress(fallbackAddress);
+    setAddressDraft(fallbackAddress);
+    setNotice({ tone: "info", text: fallbackAddress ? "Production contract restored." : "No production V2 contract is configured yet." });
   }
 
-  async function startVerification() {
-    document.getElementById("case-study")?.scrollIntoView({ behavior: "smooth", block: "start" });
-    if (!contractConfigured) {
-      await createClaim();
-      await submitEvidence();
-      await verifyEvidence();
-    } else {
-      pushLog({
-        label: "Live Mode",
-        value: "Workspace active. Connect your wallet, then complete Step 1, 2, and 3 below one by one.",
-        tone: "ok",
-      });
-    }
+  function selectClaim(id: number) {
+    setSelectedClaimId(id);
+    setMode("claim");
+    window.scrollTo({ top: 0, behavior: "smooth" });
   }
+
+  const normalizedWallet = wallet.toLowerCase();
+  const isCreator = Boolean(selectedClaim && normalizedWallet && selectedClaim.creator.toLowerCase() === normalizedWallet);
+  const canSubmit = Boolean(selectedClaim && selectedClaim.status === "OPEN" && selectedClaim.evidence_id < 0 && wallet && !isCreator);
+  const canEvaluate = selectedEvidence?.status === "PENDING";
+  const canSettle = selectedEvidence?.status === "APPROVED";
+  const canRefund = Boolean(isCreator && selectedClaim && ["OPEN", "REVIEWED"].includes(selectedClaim.status) && !canSettle && !canEvaluate);
 
   return (
-    <main className="min-h-screen overflow-hidden">
-      <header className="mx-auto mt-7 flex max-w-6xl items-center justify-between rounded-[22px] px-7 py-4 nav-shell">
-        <a href="#" className="text-3xl font-semibold tracking-[-0.05em]">SourceCred</a>
-        <nav className="hidden items-center gap-9 text-sm font-semibold md:flex">
-          <a href="#case-study">Verify</a>
-          <a href="#process">Process</a>
-          <a href="#numbers">Metrics</a>
-          <a href="#ledger">Ledger</a>
+    <main>
+      <header className="nav-shell">
+        <button className="brand" onClick={() => setMode("directory")}><Newspaper size={22} /> SourceCred News</button>
+        <nav aria-label="Primary navigation">
+          <button onClick={() => setMode("directory")}>Claims</button>
+          <button onClick={() => setMode("create")}>Open claim</button>
+          <a href="#how">How it works</a>
+          <button onClick={() => setMode("contract")}>Contract</button>
         </nav>
-        <button onClick={handleWallet} className="ink-button flex h-10 items-center gap-2 rounded-[12px] px-4 text-sm font-bold">
-          {busy === "wallet" ? <Loader2 className="animate-spin" size={16} /> : <Wallet size={16} />}
-          {wallet ? `${wallet.slice(0, 6)}...${wallet.slice(-4)}` : "Connect"}
+        <button className="wallet-button" onClick={connect} disabled={busy === "wallet"}>
+          {busy === "wallet" ? <Loader2 className="spin" size={16} /> : <Wallet size={16} />}
+          {wallet ? short(wallet) : "Connect wallet"}
         </button>
       </header>
 
-      <section className="relative mx-auto max-w-7xl px-5 pb-28 pt-40 text-center">
-        <div className="sticker absolute left-[8%] top-40 hidden -rotate-12 rounded-full px-5 py-3 text-sm font-semibold md:block">
-          Multi-source proof
-        </div>
-        <div className="sticker sticker-pink absolute right-[8%] top-64 hidden rotate-12 rounded-full px-5 py-3 text-sm font-semibold md:block">
-          Reward credible sources
-        </div>
-        <motion.div initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }}>
-          <h1 className="mx-auto max-w-5xl text-6xl font-semibold leading-[1.05] tracking-[-0.07em] md:text-8xl">
-            Hello! <span className="inline-grid size-20 translate-y-2 place-items-center rounded-full border border-[var(--line)] bg-[var(--butter)] md:size-24">
-              <Newspaper size={44} />
-            </span>{" "}
-            I&apos;m SourceCred,
-            <br />
-            a truth verification desk.
-          </h1>
-          <p className="mx-auto mt-8 max-w-3xl text-xl leading-9 text-[var(--muted)]">
-            I reward people who submit reliable sources, while GenLayer reads the web and decides whether a public
-            claim is supported, contradicted, misleading, or still unclear.
-          </p>
-          <div className="mt-10 flex flex-wrap justify-center gap-4">
-            <button onClick={startVerification} disabled={Boolean(busy)} className="dark-button flex h-13 items-center gap-2 rounded-[16px] px-7 font-bold disabled:opacity-60">
-              {busy ? <Loader2 className="animate-spin" size={17} /> : <SearchCheck size={17} />}
-              Start source review
-              <ArrowRight size={17} />
-            </button>
-            <a href="#case-study" className="ink-button flex h-13 items-center gap-2 rounded-[16px] px-7 font-bold">
-              Open verification desk
-              <PenLine size={17} />
-            </a>
-          </div>
-        </motion.div>
-      </section>
-
-      <section id="case-study" className="bg-[var(--paper)] px-5 py-24">
-        <div className="mx-auto max-w-6xl text-center">
-          <h2 className="text-5xl font-semibold tracking-[-0.055em]">Selected verification work</h2>
-          <p className="mx-auto mt-5 max-w-3xl text-xl leading-8 text-[var(--muted)]">
-            A real contract flow wrapped like a case study: frame the claim, submit source evidence, ask validators to
-            reason, then release rewards.
-          </p>
-        </div>
-
-        <div className="case-card mx-auto mt-16 grid max-w-6xl gap-9 rounded-[28px] p-8 lg:grid-cols-[0.8fr_1.2fr]">
-          <div className="flex flex-col justify-center">
-            <div className="text-sm font-bold uppercase tracking-[0.12em] text-[var(--muted)]">Claim desk</div>
-            <h3 className="mt-5 text-4xl font-semibold tracking-[-0.05em]">The public claim</h3>
-            <p className="mt-5 text-lg leading-8 text-[var(--muted)]">
-              SourceCred News does not reward opinions. It rewards evidence that helps a contract reach a transparent
-              verification verdict.
-            </p>
-            <div className="mt-7 grid gap-3">
-              <Metric label="Claim" value={`#${view.claimId}`} />
-              <Metric label="Evidence" value={`#${view.evidenceId}`} />
-              <Metric label="Verdict" value={view.verdict} />
-            </div>
-          </div>
-
-          <div className="paper-stack rounded-[28px] bg-[var(--paper)] p-5">
-            <div className="grid gap-4 rounded-[24px] border border-[var(--line)] bg-[var(--blush)] p-5">
-              <Panel title="1. Frame claim" icon={<ShieldQuestion size={18} />}>
-                <Field label="Creator" value={claimForm.creator} onChange={(creator) => setClaimForm({ ...claimForm, creator })} />
-                <Field label="Title" value={claimForm.title} onChange={(title) => setClaimForm({ ...claimForm, title })} />
-                <Field label="Claim text" value={claimForm.claimText} onChange={(claimText) => setClaimForm({ ...claimForm, claimText })} area />
-                <Field label="Context" value={claimForm.context} onChange={(context) => setClaimForm({ ...claimForm, context })} area />
-                <div className="grid gap-3 md:grid-cols-2">
-                  <Field label="Bounty" value={claimForm.bounty} onChange={(bounty) => setClaimForm({ ...claimForm, bounty })} />
-                  <Field label="Min quality score" value={claimForm.minScore} onChange={(minScore) => setClaimForm({ ...claimForm, minScore })} />
-                </div>
-                <ActionButton busy={busy === "claim"} onClick={createClaim} icon={<BookOpenCheck size={17} />}>
-                  Create claim bounty
-                </ActionButton>
-              </Panel>
-
-              <Panel title="2. Submit sources" icon={<FileSearch size={18} />}>
-                <Field label="Submitter" value={evidenceForm.submitter} onChange={(submitter) => setEvidenceForm({ ...evidenceForm, submitter })} />
-                <Field label="Primary source URL" value={evidenceForm.primaryUrl} onChange={(primaryUrl) => setEvidenceForm({ ...evidenceForm, primaryUrl })} />
-                <Field label="Secondary source URL" value={evidenceForm.secondaryUrl} onChange={(secondaryUrl) => setEvidenceForm({ ...evidenceForm, secondaryUrl })} />
-                <Field label="Source notes" value={evidenceForm.notes} onChange={(notes) => setEvidenceForm({ ...evidenceForm, notes })} area />
-                <ActionButton busy={busy === "evidence"} onClick={submitEvidence} icon={<BadgeCheck size={17} />}>
-                  Submit source packet
-                </ActionButton>
-              </Panel>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <section id="process" className="mx-auto grid max-w-7xl gap-10 px-5 py-24 lg:grid-cols-[0.85fr_1.15fr]">
-        <div>
-          <h2 className="max-w-xl text-5xl font-semibold leading-tight tracking-[-0.055em]">
-            High-quality sources with real value considered.
-          </h2>
-          <p className="mt-7 max-w-xl text-lg leading-8 text-[var(--muted)]">
-            The workflow starts with a public claim, asks contributors for source packets, then lets GenLayer judge
-            support, contradiction, missing context, and reward quality.
-          </p>
-          <a href="#ledger" className="ink-button mt-8 inline-flex h-12 items-center rounded-[14px] px-6 font-bold">
-            See ledger
+      <div className="network-strip">
+        <span><i /> {configuredNetwork}</span>
+        {addressPattern.test(address) ? (
+          <a
+            className="contract-explorer"
+            href={`https://explorer-studio.genlayer.com/address/${address}`}
+            target="_blank"
+            rel="noreferrer"
+            title="Open contract transactions in GenLayer Studio Explorer"
+          >
+            Contract {short(address)} <ExternalLink size={13} />
           </a>
-        </div>
-        <div className="grid gap-5">
-          <ProcessCard number="01" color="bg-[var(--blush)]" title="Problem framing" icon={<ShieldQuestion />}>
-            Turn a vague rumor into a specific claim with context and a bounty for useful source evidence.
-          </ProcessCard>
-          <ProcessCard number="02" color="bg-[var(--mint)]" title="Source packet" icon={<FileSearch />}>
-            Contributors submit primary and secondary URLs with notes explaining relevance.
-          </ProcessCard>
-          <ProcessCard number="03" color="bg-[var(--butter)]" title="On-chain verification" icon={<SearchCheck />}>
-            GenLayer reads the web, weighs reliability and contradictions, then stores a claim verdict.
-          </ProcessCard>
-        </div>
-      </section>
+        ) : <span>V2 contract not configured</span>}
+        <button onClick={() => sync(false)} disabled={busy === "sync"}><RefreshCw className={busy === "sync" ? "spin" : ""} size={14} /> Sync</button>
+      </div>
 
-      <section id="ledger" className="bg-[var(--paper)] px-5 py-24">
-        <div className="mx-auto max-w-6xl">
-          <div className="grid gap-8 lg:grid-cols-[0.9fr_1.1fr]">
-            <div>
-              <h2 className="text-5xl font-semibold tracking-[-0.055em]">Verification ledger</h2>
-              <p className="mt-5 text-lg leading-8 text-[var(--muted)]">{view.reason}</p>
-              <div className="mt-7 flex flex-wrap gap-3">
-                <ActionButton busy={busy === "verify"} onClick={verifyEvidence} icon={<SearchCheck size={17} />}>
-                  Verify evidence
-                </ActionButton>
-                <ActionButton busy={busy === "reward"} onClick={releaseReward} icon={<HandCoins size={17} />}>
-                  Release source reward
-                </ActionButton>
-              </div>
-            </div>
-            <div className="soft-card rounded-[28px] bg-[var(--sky)] p-6">
-              <div className="flex items-center justify-between">
-                <div className={`inline-flex rounded-full border border-[var(--line)] px-4 py-2 text-sm font-bold ${statusClass[view.status] || statusClass.DRAFT}`}>
-                  {view.status}
-                </div>
-                <button
-                  onClick={syncState}
-                  disabled={Boolean(busy)}
-                  className="inline-flex h-9 items-center justify-center gap-1.5 rounded-full border border-[var(--line)] bg-white px-4 text-xs font-bold shadow-[2px_2px_0_var(--line)] transition-all hover:translate-x-[1px] hover:translate-y-[1px] hover:shadow-[1px_1px_0_var(--line)] disabled:opacity-50"
-                >
-                  <Loader2 size={12} className={busy === "sync" ? "animate-spin" : ""} />
-                  {busy === "sync" ? "Syncing..." : "Sync Contract"}
-                </button>
-              </div>
-              <div className="mt-6 grid gap-4 sm:grid-cols-3">
-                <Metric label="Quality" value={view.quality} large />
-                <Metric label="Confidence" value={view.confidence} large />
-                <Metric label="Reward %" value={view.reward} large />
-              </div>
-              <div className="mt-6 grid gap-2">
-                {logs.map((entry) => (
-                  <div key={`${entry.label}-${entry.value}`} className={`rounded-[16px] border border-[var(--line)] px-4 py-3 text-sm ${logClass(entry.tone)}`}>
-                    <span className="font-bold">{entry.label}:</span>{" "}
-                    <span>{entry.value}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
+      {notice && <div className={`notice ${notice.tone}`}><span>{notice.text}</span>{notice.hash && <code>{notice.hash}</code>}<button aria-label="Dismiss notice" onClick={() => setNotice(null)}>x</button></div>}
+
+      {mode === "directory" && <>
+        <section className="hero">
+          <motion.div initial={{ opacity: 0, y: 18 }} animate={{ opacity: 1, y: 0 }}>
+            <p className="eyebrow">Fund sources, not opinions</p>
+            <h1>Public claims deserve<br /><em>public proof.</em></h1>
+            <p className="hero-copy">Lock a GEN reward behind one precise claim. Independent contributors bring two sources; GenLayer reads both and decides whether the evidence deserves payment.</p>
+            <div className="hero-actions"><button className="primary" onClick={() => setMode("create")}>Open a funded claim <ArrowRight size={17} /></button><a href="#directory">Browse live claims</a></div>
+          </motion.div>
+          <div className="hero-seal"><ShieldCheck size={40} /><strong>ON-CHAIN</strong><span>source jury</span></div>
+        </section>
+
+        <Reveal><section className="metrics" aria-label="Live SourceCred metrics">
+          <Metric label="Funded claims" value={String(platform.claim_count)} />
+          <Metric label="Source packets" value={String(platform.evidence_count)} />
+          <Metric label="Escrow held" value={fromWei(platform.contract_balance)} />
+          <Metric label="Paid to sources" value={fromWei(platform.total_paid)} />
+        </section></Reveal>
+
+        <Reveal><section id="directory" className="directory-section">
+          <div className="section-heading"><div><p className="eyebrow">Live verification board</p><h2>Claims awaiting proof</h2></div><button className="secondary" onClick={() => setMode("create")}>New claim <ArrowRight size={16} /></button></div>
+          <div className="claim-list">
+            {claims.length === 0 && <div className="empty"><FileSearch size={26} /><strong>No V2 claims found.</strong><span>Deploy the new contract, then fund the first public claim.</span></div>}
+            {claims.map((claim) => <button className="claim-row" key={claim.claim_id} onClick={() => selectClaim(claim.claim_id)}><span className="claim-index">#{claim.claim_id}</span><span><strong>{claim.title}</strong><small>{claim.status} · {fromWei(claim.available)} available</small></span><ArrowRight size={17} /></button>)}
           </div>
-        </div>
-      </section>
+        </section></Reveal>
 
-      <section id="numbers" className="px-5 py-24 text-center">
-        <h2 className="text-5xl font-semibold tracking-[-0.055em]">The source desk says it all</h2>
-        <p className="mx-auto mt-5 max-w-3xl text-xl leading-8 text-[var(--muted)]">
-          These numbers reflect a verification flow designed for useful sources, not noisy takes.
-        </p>
-        <div className="mx-auto mt-12 flex max-w-5xl flex-wrap justify-center gap-6">
-          <Stat number="2+" label="sources per packet" />
-          <Stat number="4" label="claim verdicts" />
-          <Stat number="100%" label="on-chain reward guard" />
-          <Stat number="5" label="quality checks" />
-        </div>
-      </section>
+        <Reveal><section id="how" className="how-section"><p className="eyebrow">One claim. One packet. One outcome.</p><h2>How SourceCred works</h2><div className="how-grid"><How number="01" title="Fund" text="The claim creator locks real GEN and publishes one precise statement." /><How number="02" title="Source" text="A different wallet submits two independent HTTPS sources and relevance notes." /><How number="03" title="Judge" text="GenLayer validators read both pages and agree on verdict plus payout band." /><How number="04" title="Settle" text="The contract transfers escrow to the contributor or refunds the creator." /></div></section></Reveal>
+      </>}
+
+      {mode === "create" && <Workspace title="Fund a verification" subtitle="The connected wallet becomes the claim creator and the attached GEN becomes contract-held escrow." onBack={() => setMode("directory")}>
+        <div className="form-grid"><Field label="Claim title" value={claimForm.title} onChange={(title) => setClaimForm({ ...claimForm, title })} placeholder="What should the public be able to verify?" /><Field label="Public claim" value={claimForm.claimText} onChange={(claimText) => setClaimForm({ ...claimForm, claimText })} placeholder="Write one factual, falsifiable statement." area /><Field label="Context" value={claimForm.context} onChange={(context) => setClaimForm({ ...claimForm, context })} placeholder="Time period, location, and why this matters." area /><div className="form-pair"><Field label="Escrow (GEN)" value={claimForm.escrow} onChange={(escrow) => setClaimForm({ ...claimForm, escrow })} /><Field label="Full payout score" value={claimForm.minScore} onChange={(minScore) => setClaimForm({ ...claimForm, minScore })} /></div></div>
+        <button className="primary" onClick={createClaim} disabled={busy === "create"}>{busy === "create" ? <Loader2 className="spin" /> : <BookOpenCheck size={17} />} Fund public claim <ArrowRight size={17} /></button>
+      </Workspace>}
+
+      {mode === "claim" && selectedClaim && <Workspace title={selectedClaim.title} subtitle={`Claim #${selectedClaim.claim_id} · ${selectedClaim.status} · ${fromWei(selectedClaim.available)} available`} onBack={() => setMode("directory")}>
+        <div className="claim-copy"><p>{selectedClaim.claim_text}</p>{selectedClaim.context && <small>{selectedClaim.context}</small>}</div>
+        {selectedEvidence && <div className="verdict"><div><span>Verdict</span><strong>{selectedEvidence.verdict}</strong></div><div><span>Quality</span><strong>{selectedEvidence.quality_score}/100</strong></div><div><span>Payout</span><strong>{fromWei(selectedEvidence.payout)}</strong></div><p>{selectedEvidence.reason}</p><div className="sources"><a href={selectedEvidence.primary_url} target="_blank" rel="noreferrer">Primary source <ExternalLink size={13} /></a><a href={selectedEvidence.secondary_url} target="_blank" rel="noreferrer">Secondary source <ExternalLink size={13} /></a></div></div>}
+
+        {canSubmit && <div className="focus-action"><p className="eyebrow">Your next action</p><h3>Submit two independent sources</h3><Field label="Primary source URL" value={evidenceForm.primaryUrl} onChange={(primaryUrl) => setEvidenceForm({ ...evidenceForm, primaryUrl })} placeholder="https://official-source.example/report" /><Field label="Secondary source URL" value={evidenceForm.secondaryUrl} onChange={(secondaryUrl) => setEvidenceForm({ ...evidenceForm, secondaryUrl })} placeholder="https://independent-publisher.example/investigation" /><Field label="Relevance notes" value={evidenceForm.notes} onChange={(notes) => setEvidenceForm({ ...evidenceForm, notes })} placeholder="Explain what each source proves and where they agree or conflict." area /><button className="primary" onClick={submitEvidence} disabled={busy === "submit"}>{busy === "submit" ? <Loader2 className="spin" /> : <FileSearch size={17} />} Submit source packet <ArrowRight size={17} /></button></div>}
+        {!wallet && <div className="focus-action compact"><p>Connect a wallet to see the action available to this identity.</p><button className="primary" onClick={connect}><Wallet size={17} /> Connect wallet</button></div>}
+        {wallet && isCreator && selectedClaim.evidence_id < 0 && <div className="focus-action compact"><p>Your claim is open for an independent contributor. You may close it and recover escrow before evidence is submitted.</p>{canRefund && <button className="secondary" onClick={closeClaim} disabled={busy === "refund"}><RotateCcw size={16} /> Close and refund</button>}</div>}
+        {canEvaluate && <div className="focus-action compact"><p>The source packet is immutable. Ask GenLayer validators to read both pages and decide the substantive verdict.</p><button className="primary" onClick={evaluateEvidence} disabled={busy === "evaluate"}>{busy === "evaluate" ? <Loader2 className="spin" /> : <Scale size={17} />} Run source jury <ArrowRight size={17} /></button></div>}
+        {canSettle && <div className="focus-action compact"><p>The jury approved this packet. Settlement transfers reserved GEN to the recorded contributor.</p><button className="primary" onClick={settleReward} disabled={busy === "settle"}>{busy === "settle" ? <Loader2 className="spin" /> : <CircleDollarSign size={17} />} Pay source contributor <ArrowRight size={17} /></button></div>}
+        {canRefund && selectedClaim.evidence_id >= 0 && <div className="focus-action compact"><p>No payout is reserved. The authenticated creator can close the claim and recover remaining escrow.</p><button className="secondary" onClick={closeClaim} disabled={busy === "refund"}><RotateCcw size={16} /> Close and refund</button></div>}
+        {selectedEvidence?.status === "PAID" && <div className="done"><BadgeCheck size={22} /> Source contributor paid from contract escrow.</div>}
+      </Workspace>}
+
+      {mode === "contract" && <Workspace title="Contract connection" subtitle="Reviewers can select a deployment at runtime and prove its live state without changing the build." onBack={() => setMode("directory")}>
+        <Field label="Studionet contract address" value={addressDraft} onChange={setAddressDraft} placeholder="0x..." />
+        <div className="button-row"><button className="primary" onClick={useAddress}><RefreshCw size={16} /> Use and verify</button><button className="secondary" onClick={restoreAddress}><RotateCcw size={16} /> Restore production default</button></div>
+        <div className="contract-state"><strong>Active address</strong><code>{address || "Not configured"}</code><span>{platform.claim_count} claims · {platform.evidence_count} source packets · {fromWei(platform.contract_balance)} held</span></div>
+      </Workspace>}
     </main>
   );
 }
 
-function Field({
-  label,
-  value,
-  onChange,
-  area = false,
-}: {
-  label: string;
-  value: string;
-  onChange: (value: string) => void;
-  area?: boolean;
-}) {
-  const className = "field rounded-[12px] px-3 py-2.5 text-sm";
-  return (
-    <label className="grid gap-1.5">
-      <span className="text-xs font-bold uppercase tracking-[0.1em] text-[var(--muted)]">{label}</span>
-      {area ? (
-        <textarea className={`${className} min-h-20 resize-none`} value={value} onChange={(event) => onChange(event.target.value)} />
-      ) : (
-        <input className={className} value={value} onChange={(event) => onChange(event.target.value)} />
-      )}
-    </label>
-  );
+function Reveal({ children }: { children: React.ReactNode }) {
+  return <motion.div initial={{ opacity: 0, y: 24 }} whileInView={{ opacity: 1, y: 0 }} viewport={{ once: true, amount: 0.15 }} transition={{ duration: 0.5 }}>{children}</motion.div>;
 }
 
-function Panel({ title, icon, children }: { title: string; icon: React.ReactNode; children: React.ReactNode }) {
-  return (
-    <div className="rounded-[20px] border border-[var(--line)] bg-[var(--paper)] p-4">
-      <div className="mb-4 flex items-center gap-2 text-sm font-bold">
-        <span className="grid size-9 place-items-center rounded-full border border-[var(--line)] bg-[var(--mint)]">
-          {icon}
-        </span>
-        {title}
-      </div>
-      <div className="grid gap-3">{children}</div>
-    </div>
-  );
+function Workspace({ title, subtitle, onBack, children }: { title: string; subtitle: string; onBack: () => void; children: React.ReactNode }) {
+  return <section className="workspace"><button className="back" onClick={onBack}><ArrowLeft size={15} /> Back</button><div className="workspace-head"><p className="eyebrow">Live contract workspace</p><h1>{title}</h1><p>{subtitle}</p></div><div className="workspace-card">{children}</div></section>;
 }
 
-function ActionButton({
-  children,
-  icon,
-  busy,
-  onClick,
-}: {
-  children: React.ReactNode;
-  icon: React.ReactNode;
-  busy: boolean;
-  onClick: () => void;
-}) {
-  return (
-    <button onClick={onClick} disabled={busy} className="ink-button flex h-11 items-center justify-center gap-2 rounded-[14px] px-4 text-sm font-bold disabled:opacity-60">
-      {busy ? <Loader2 className="animate-spin" size={17} /> : icon}
-      {children}
-    </button>
-  );
+function Field({ label, value, onChange, placeholder = "", area = false }: { label: string; value: string; onChange: (value: string) => void; placeholder?: string; area?: boolean }) {
+  return <label className="field-wrap"><span>{label}</span>{area ? <textarea value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} /> : <input value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} />}</label>;
 }
 
-function Metric({ label, value, large = false }: { label: string; value: string; large?: boolean }) {
-  return (
-    <div className="rounded-[18px] border border-[var(--line)] bg-[var(--paper)] p-4">
-      <div className="text-xs font-bold uppercase tracking-[0.12em] text-[var(--muted)]">{label}</div>
-      <div className={`${large ? "outline-text text-5xl" : "text-2xl"} mt-2 font-semibold tracking-[-0.05em]`}>
-        {value}
-      </div>
-    </div>
-  );
+function Metric({ label, value }: { label: string; value: string }) {
+  return <div><strong>{value}</strong><span>{label}</span></div>;
 }
 
-function ProcessCard({
-  number,
-  color,
-  title,
-  icon,
-  children,
-}: {
-  number: string;
-  color: string;
-  title: string;
-  icon: React.ReactNode;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className={`soft-card rounded-[28px] ${color} p-8`}>
-      <div className="flex items-start justify-between">
-        <span className="grid size-16 place-items-center rounded-full border border-[var(--line)] bg-[var(--paper)]">
-          {icon}
-        </span>
-        <span className="text-lg">({number})</span>
-      </div>
-      <h3 className="mt-8 text-2xl font-semibold tracking-[-0.04em]">{title}</h3>
-      <p className="mt-4 text-lg leading-8 text-[var(--muted)]">{children}</p>
-    </div>
-  );
-}
-
-function Stat({ number, label }: { number: string; label: string }) {
-  return (
-    <div className="case-card flex min-w-[250px] items-center gap-5 rounded-full px-7 py-5 text-left">
-      <span className="outline-text text-5xl font-semibold tracking-[-0.06em]">{number}</span>
-      <span className="text-lg leading-6">{label}</span>
-    </div>
-  );
-}
-
-function logClass(tone: Tone) {
-  if (tone === "ok") {
-    return "bg-[var(--mint)]";
-  }
-  if (tone === "bad") {
-    return "bg-[var(--blush)]";
-  }
-  return "bg-[var(--butter)]";
+function How({ number, title, text }: { number: string; title: string; text: string }) {
+  return <article><span>{number}</span><h3>{title}</h3><p>{text}</p></article>;
 }

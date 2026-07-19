@@ -6,7 +6,9 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test:live": "node scripts/live-lifecycle.mjs",
+    "test:inspect-payout": "node scripts/inspect-payout.mjs"
   },
   "dependencies": {
     "framer-motion": "^12.23.26",

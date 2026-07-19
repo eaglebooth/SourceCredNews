@@ -1,17 +1,8 @@
 import { createClient } from "genlayer-js";
-import {
-  localnet,
-  studionet,
-  testnetAsimov,
-  testnetBradbury,
-} from "genlayer-js/chains";
-import { ExecutionResult, TransactionStatus } from "genlayer-js/types";
+import { localnet, studionet, testnetAsimov, testnetBradbury } from "genlayer-js/chains";
+import { TransactionStatus } from "genlayer-js/types";
 
-type NetworkName =
-  | "localnet"
-  | "studionet"
-  | "testnetAsimov"
-  | "testnetBradbury";
+export type NetworkName = "localnet" | "studionet" | "testnetAsimov" | "testnetBradbury";
 
 declare global {
   interface Window {
@@ -23,156 +14,156 @@ declare global {
 
 const network = (process.env.NEXT_PUBLIC_NETWORK as NetworkName) || "studionet";
 const endpoint = process.env.NEXT_PUBLIC_GENLAYER_RPC;
-const chainMap = {
-  localnet,
-  studionet,
-  testnetAsimov,
-  testnetBradbury,
-};
-
-const client = createClient({
+const chainMap = { localnet, studionet, testnetAsimov, testnetBradbury };
+const readClient = createClient({
   chain: chainMap[network] ?? studionet,
   ...(endpoint ? { endpoint } : {}),
 });
 
-type GenLayerRuntimeClient = {
-  readContract: (args: {
-    address: unknown;
-    functionName: string;
-    args: unknown[];
-  }) => Promise<unknown>;
-  writeContract: (args: {
-    address: unknown;
-    functionName: string;
-    args: unknown[];
-    value: bigint;
-  }) => Promise<string>;
+type ReceiptLike = {
+  statusName?: string;
+  txExecutionResultName?: string;
+  txDataDecoded?: unknown;
+  consensus_data?: {
+    validators?: Array<{ genvm_result?: { execution_result?: string; stderr?: string } }>;
+  };
+};
+
+type RuntimeClient = {
+  connect?: (networkName: NetworkName) => Promise<unknown>;
+  readContract: (args: { address: unknown; functionName: string; args: unknown[] }) => Promise<unknown>;
+  writeContract: (args: { address: unknown; functionName: string; args: unknown[]; value: bigint }) => Promise<string>;
   waitForTransactionReceipt: (args: {
     hash: `0x${string}`;
     status: string;
-  }) => Promise<{
-    statusName?: string;
-    txExecutionResultName?: string;
-    txDataDecoded?: unknown;
-  }>;
+    interval?: number;
+    retries?: number;
+  }) => Promise<ReceiptLike>;
+  getTransaction: (args: { hash: `0x${string}` }) => Promise<ReceiptLike>;
 };
 
 export type ContractResult = {
   success: boolean;
+  pending?: boolean;
   data?: unknown;
   hash?: string;
   status?: string;
   error?: string;
 };
 
-function getContractAddress(contractAddress?: string) {
-  return contractAddress || process.env.NEXT_PUBLIC_CONTRACT_ADDRESS || "";
+export const configuredNetwork = network;
+
+export function defaultContractAddress() {
+  return process.env.NEXT_PUBLIC_CONTRACT_ADDRESS || "";
+}
+
+function validAddress(address: string) {
+  return /^0x[a-fA-F0-9]{40}$/.test(address);
+}
+
+function receiptFailure(receipt: ReceiptLike) {
+  const executions = receipt.consensus_data?.validators
+    ?.map((validator) => validator.genvm_result)
+    .filter((execution) => Boolean(execution?.execution_result)) || [];
+  if (executions.length && executions.every((execution) => execution?.execution_result === "ERROR")) {
+    const stderr = executions.find((execution) => execution?.stderr)?.stderr || "";
+    return stderr.trim().split("\n").filter(Boolean).at(-1) || "GenVM execution failed.";
+  }
+  if (receipt.txExecutionResultName === "FINISHED_WITH_ERROR") return "Contract execution failed.";
+  return "";
 }
 
 export async function readContract(
+  address: string,
   functionName: string,
   args: unknown[] = [],
-  contractAddress?: string,
 ): Promise<ContractResult> {
+  if (!validAddress(address)) return { success: false, error: "Enter a valid deployed contract address." };
   try {
-    const address = getContractAddress(contractAddress);
-    if (!address) {
-      return { success: false, error: "Contract address is not configured" };
-    }
-    const runtimeClient = client as unknown as GenLayerRuntimeClient;
-    const data = await runtimeClient.readContract({ address, functionName, args });
+    const data = await (readClient as unknown as RuntimeClient).readContract({ address, functionName, args });
     return { success: true, data };
   } catch (error) {
-    return {
-      success: false,
-      error: error instanceof Error ? error.message : "Read failed",
-    };
+    return { success: false, error: error instanceof Error ? error.message : "Contract read failed." };
   }
 }
 
 export async function connectWallet(): Promise<ContractResult> {
   if (typeof window === "undefined" || !window.ethereum) {
-    return { success: false, error: "Wallet provider not found" };
+    return { success: false, error: "Install or unlock a browser wallet to continue." };
   }
   try {
-    const accounts = (await window.ethereum.request({
-      method: "eth_requestAccounts",
-      params: [],
-    })) as string[];
-    return { success: true, data: accounts[0] };
+    const accounts = (await window.ethereum.request({ method: "eth_requestAccounts", params: [] })) as string[];
+    return accounts[0]
+      ? { success: true, data: accounts[0] }
+      : { success: false, error: "No wallet account selected." };
   } catch (error) {
-    return {
-      success: false,
-      error: error instanceof Error ? error.message : "Wallet connection failed",
-    };
+    return { success: false, error: error instanceof Error ? error.message : "Wallet connection failed." };
   }
 }
 
 export async function writeContract(
+  address: string,
   functionName: string,
   args: unknown[] = [],
-  contractAddress?: string,
+  value: bigint = BigInt(0),
 ): Promise<ContractResult> {
-  if (typeof window === "undefined") {
-    return { success: false, error: "Contract writes are only available in the browser" };
+  if (!validAddress(address)) return { success: false, error: "Enter a valid deployed contract address." };
+  if (typeof window === "undefined" || !window.ethereum) {
+    return { success: false, error: "A browser wallet is required for contract writes." };
   }
 
+  let hash = "";
+  let runtime: RuntimeClient | null = null;
   try {
-    const address = getContractAddress(contractAddress);
-    if (!address) {
-      return { success: false, error: "Contract address is not configured" };
-    }
-    if (!window.ethereum) {
-      return { success: false, error: "Wallet provider not found" };
-    }
-    const accounts = (await window.ethereum.request({
-      method: "eth_requestAccounts",
-      params: [],
-    })) as string[];
-    const account = accounts[0];
-    if (!account) {
-      return { success: false, error: "No wallet account selected" };
-    }
-
-    const writeClient = createClient({
+    const accounts = (await window.ethereum.request({ method: "eth_requestAccounts", params: [] })) as string[];
+    if (!accounts[0]) return { success: false, error: "No wallet account selected." };
+    runtime = createClient({
       chain: chainMap[network] ?? studionet,
       ...(endpoint ? { endpoint } : {}),
       provider: window.ethereum,
-      account: account as `0x${string}`,
-    });
+      account: accounts[0] as `0x${string}`,
+    }) as unknown as RuntimeClient;
+    if (runtime.connect) await runtime.connect(network);
 
-    const runtimeClient = writeClient as unknown as GenLayerRuntimeClient;
-    const hash = await runtimeClient.writeContract({
-      address,
-      functionName,
-      args,
-      value: BigInt(0),
-    });
-
-    const receipt = await runtimeClient.waitForTransactionReceipt({
+    hash = await runtime.writeContract({ address, functionName, args, value });
+    const receipt = await runtime.waitForTransactionReceipt({
       hash: hash as `0x${string}`,
-      status: TransactionStatus.FINALIZED,
+      status: TransactionStatus.ACCEPTED,
+      interval: 2_000,
+      retries: 120,
     });
-
-    if (receipt.txExecutionResultName === ExecutionResult.FINISHED_WITH_ERROR) {
-      return {
-        success: false,
-        hash,
-        status: receipt.statusName,
-        error: "Contract execution failed",
-      };
+    let observed = receipt;
+    try {
+      observed = await runtime.getTransaction({ hash: hash as `0x${string}` });
+    } catch {
+      // State verification in the UI remains authoritative when metadata lags.
     }
-
+    const failure = receiptFailure(observed);
+    if (failure) return { success: false, hash, status: observed.statusName, error: failure };
     return {
       success: true,
       hash,
-      status: receipt.statusName,
-      data: receipt.txDataDecoded,
+      status: observed.statusName || receipt.statusName,
+      data: observed.txDataDecoded ?? receipt.txDataDecoded,
     };
   } catch (error) {
-    return {
-      success: false,
-      error: error instanceof Error ? error.message : "Write failed",
-    };
+    if (hash && runtime) {
+      try {
+        const transaction = await runtime.getTransaction({ hash: hash as `0x${string}` });
+        const status = transaction.statusName || "PROCESSING";
+        if (["PENDING", "PROPOSING", "COMMITTING", "REVEALING", "ACCEPTED"].includes(status)) {
+          return {
+            success: false,
+            pending: true,
+            hash,
+            status,
+            error: `Transaction is still ${status}. Do not resubmit; sync the existing state after consensus.`,
+          };
+        }
+      } catch {
+        // Return the original SDK error when monitoring is unavailable.
+      }
+    }
+    return { success: false, hash: hash || undefined, error: error instanceof Error ? error.message : "Write failed." };
   }
 }
